@@ -1,0 +1,123 @@
+pool:
+  vmImage: 'windows-latest'
+      
+variables:
+  - group: bp-main-vg
+
+jobs:
+- job: mirror_customer_solution
+  
+  steps: 
+        - task: CmdLine@2
+          displayName: git mirror
+          inputs:
+            script: git clone --mirror https://$(AZDO_CUST_ORG_NAME):$(System.AccessToken)@dev.azure.com/$(AZDO_CUST_ORG_NAME)/$(AZDO_CUST_PROJECT_NAME)/_git/mirror $(System.DefaultWorkingDirectory)/temp/mirror
+
+        - task: Bash@3
+          displayName: Timestamp
+          inputs:
+            targetType: 'inline'
+            script: |
+              timestamp=$(date +"%Y%m%d%H%M")
+              echo $timestamp   
+              echo "##vso[task.setvariable variable=g_date]$timestamp"
+              echo $(g_date)
+
+     
+        
+
+        - task: ArchiveFiles@2
+          inputs:
+            rootFolderOrFile: '$(System.DefaultWorkingDirectory)/temp/mirror'
+            includeRootFolder: true
+            archiveType: 'zip'
+            archiveFile: '$(System.DefaultWorkingDirectory)/mirror-$(g_date).zip'
+            replaceExistingArchive: true
+          displayName: 'ziping repository'
+      
+        - task: AzureFileCopy@3
+          inputs:
+            SourcePath: '$(System.DefaultWorkingDirectory)/mirror-$(g_date).zip'
+            azureSubscription: 'gauthamaspire'
+            Destination: 'AzureBlob'
+            storage: 'gauthamstorage'
+            ContainerName: 'sourcefiles'
+          displayName: 'copy repo to container'
+      
+
+        - powershell:  |
+            Install-Module -Name Az -AllowClobber -Scope CurrentUser -Force
+            $clientID = "$(ARM_CLIENT_ID)"
+            $tenantID = "$(ARM_TENANT_ID)"
+            $clientSecret = "$(ARM_CLIENT_SECRET)"
+            $subscriptionID = "$(ARM_SUBSCRIPTION_ID)"
+            $storageAccountName = "$(BUILDPLACE_ID)"
+            $containerName = "sourcefiles"
+            $count=0  
+            echo $clientID
+            echo $tenantID
+            echo $subscriptionID
+            echo $containerName
+            echo $storageAccountName
+            echo $(new_repo_name)
+            
+            
+            # Connect to AzureAccount in the specified subscription
+            $spPassword = ConvertTo-SecureString $clientSecret -AsPlainText -Force
+            $psCred = New-Object System.Management.Automation.PSCredential($clientID, $spPassword)
+            Connect-AzAccount -Credential $psCred -Tenant $tenantID -ServicePrincipal
+            Select-AzSubscription -SubscriptionId $subscriptionID
+
+            # Set the Context
+            $ctx = New-AzStorageContext -StorageAccountName $storageAccountName -UseConnectedAccount
+            $zipFn = "mirror-*.zip"
+          
+          
+            Write-Host "checking for blobs in container if they are more than 3 then older blobs will be deleted"
+            $blobs=Get-AzStorageBlob -Container $containerName  -Context $ctx  -Blob $zipFn
+            $count=$blobs.Count
+            Write-Host $count 
+            $currDateTime = [datetime]::Now
+
+            $daysOld = 2
+
+ 
+
+            if ($null -ne $blobs) {
+
+              foreach ($blob in $blobs) {
+
+                  $fn = $blob.Name
+
+                  if ($fn -like "customer-solution-*") {
+
+                      $lastModified = $blob.LastModified.DateTime
+
+                      Write-Output "$fn is modified on $lastModified"
+
+  
+
+                      $daysDuration = ($currDateTime - $lastModified).Days
+
+                      if ($daysDuration -gt $daysOld) {
+
+                          Remove-AzStorageBlob -Blob $fn -Container $containerName -Context $ctx
+
+                          Write-Output "Removed $fn since it is $daysDuration old"
+
+                      } else {
+
+                          Write-Output "Retained $fn since it is $daysDuration old"
+
+                      }
+
+                  } else {
+
+                      Write-Output "Ignored $fn"
+
+                  }    
+
+                  }   
+
+                  }
+            displayName: Upload New Archives,Delete Old
